@@ -92,7 +92,7 @@ jobs:
       - name: Set up Java
         uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
-          java-version: 25.0.4+101.0.LTS
+          java-version: 17
           distribution: temurin
 
       - name: Set up Gradle
@@ -115,7 +115,7 @@ jobs:
 
           TASKS=()
           for module in "${MODULES[@]}"; do
-            TASKS+=("${module}:assembleRelease" "${module}:lintRelease")
+            TASKS+=("${module}:assembleDebug" "${module}:lintDebug")
           done
           ./gradlew "${TASKS[@]}"
 
@@ -136,7 +136,7 @@ jobs:
       - name: Set up Java
         uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
-          java-version: 25.0.4+101.0.LTS
+          java-version: 17
           distribution: temurin
 
       - name: Set up Gradle
@@ -144,95 +144,23 @@ jobs:
         with:
           cache-read-only: true
 
-      - name: Prepare signing key
-        run: |
-          echo ${{ secrets.SIGNING_KEY }} | base64 -d > signingkey.jks
-
       - name: Build extensions (${{ matrix.chunk.number }})
         env:
           MODULES: ${{ join(matrix.chunk.modules, ' ') }}
-          ALIAS: ${{ secrets.ALIAS }}
-          KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           TASKS=()
           for module in $MODULES; do
-            TASKS+=("${module}:assembleRelease")
+            TASKS+=("${module}:assembleDebug")
           done
           ./gradlew "${TASKS[@]}"
 
       - name: Upload APKs (${{ matrix.chunk.number }})
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: github.repository == 'yuzono/cursed-manga-extensions'
         with:
           name: "individual-apks-${{ matrix.chunk.number }}"
           path: |
-            **/build/outputs/apk/release/*.apk
-            **/build/outputs/jar/release/*.jar
+            **/build/outputs/apk/debug/*.apk
+            **/build/outputs/jar/debug/*.jar
             **/build/keiyoushi-source-info.json
           retention-days: 1
-
-      - name: Clean up CI files
-        if: always()
-        run: rm signingkey.jks
-
-  publish:
-    name: Publish extension repo
-    needs: [prepare, build-extensions]
-    # Run whenever there's anything to publish, new/changed builds OR only deletions
-    if: >-
-      always() &&
-      github.repository == 'yuzono/cursed-manga-extensions' &&
-      needs.prepare.result == 'success' &&
-      needs.build-extensions.result != 'failure' &&
-      needs.build-extensions.result != 'cancelled' &&
-      needs.prepare.outputs.delete != '[]'
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    steps:
-      - name: Download APK artifacts
-        if: needs.build-extensions.result == 'success'
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          path: ~/apk-artifacts
-
-      - name: Checkout ${{ github.ref_name }} branch
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.ref_name }}
-          path: ${{ github.ref_name }}
-          persist-credentials: false
-
-      - name: Checkout repo branch
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: yuzono/cursed-manga-repo
-          token: ${{ secrets.BOT_PAT }}
-          ref: repo
-          path: repo
-          persist-credentials: true
-
-      - name: Publish and deploy repo
-        env:
-          COMMIT_MESSAGE: ${{ needs.prepare.outputs.latestCommitMessage }}
-          DELETE: ${{ needs.prepare.outputs.delete }}
-          FULL_REBUILD: ${{ needs.prepare.outputs.full_rebuild }}
-          GH_TOKEN: ${{ secrets.BOT_PAT }}
-        run: |
-          cd repo
-          pip install protobuf
-          python -u ../${{ github.ref_name }}/.github/scripts/publish-repo.py "$DELETE" "$GITHUB_SHA" "$FULL_REBUILD"
-          git config user.name "Yūzōnō"
-          git config user.email "yuzono@users.noreply.github.com"
-          git status
-          if [ -n "$(git status --porcelain)" ]; then
-            git add .
-            git commit -m "$COMMIT_MESSAGE"
-            git push
-            curl https://purge.jsdelivr.net/gh/yuzono/cursed-manga-repo@repo/index.json
-            curl https://purge.jsdelivr.net/gh/yuzono/cursed-manga-repo@repo/index.pb
-          else
-            echo "No changes to commit"
-          fi
-
           
