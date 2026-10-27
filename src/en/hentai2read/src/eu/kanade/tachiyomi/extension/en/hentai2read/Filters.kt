@@ -14,7 +14,7 @@ internal class TypeFilter :
     QueryPartFilter(
         "Type",
         listOf(
-            "Any" to "",
+            "All" to "",
             "Original" to "original",
             "Doujinshi" to "doujinshi",
             "Image sets" to "imageset",
@@ -36,41 +36,37 @@ internal class SortFilter :
     QueryPartFilter(
         "Sort by",
         listOf(
-            "Recently updated" to "",
+            "Best match" to "",
             "Newest" to "newest",
+            "Oldest" to "oldest",
+            "Recently updated" to "latest",
             "Most read" to "most-viewed",
             "Highest rated" to "top-rated",
-            "Top yesterday" to "yesterday",
-            "Top last week" to "last-week",
-            "Top last month" to "last-month",
             "A to Z" to "alphabetical",
+            "Most chapters" to "most-chapters",
+            "Most pages" to "most-pages",
+            "Fewest pages" to "fewest-pages",
         ),
     )
 
-// Include maps to `with`, exclude maps to `without`.
 internal class TagFilter(val id: Int, name: String) : Filter.TriState(name)
 
 internal class TagGroup(name: String, tags: List<TagFilter>) : Filter.Group<TagFilter>(name, tags)
 
-// Tag types offered in the filter. Artist, parody and character lists run to thousands of entries.
+// Artist, parody and character lists run to thousands of entries, so only these are offered.
 internal val TAG_TYPES = listOf("category", "content")
 
 internal fun hentai2readFilters(tags: List<TagDto>): FilterList {
     val filters = buildList<Filter<*>> {
+        add(Filter.Header("Search also takes artist:name, tag:name and -tag:name. Quote names with spaces: artist:\"two words\""))
+        add(Filter.Separator())
         add(TypeFilter())
         add(StatusFilter())
         add(SortFilter())
 
-        if (tags.isEmpty()) {
-            add(Filter.Separator())
-            add(Filter.Header("Press 'Reset' to load tags"))
-        }
-
-        // The groups are always present, empty until the tag data has been fetched.
         TAG_TYPES.forEach { type ->
-            val label = type.replaceFirstChar { it.uppercase() }
             val group = tags.filter { it.type == type }.map { it.toFilter() }.sortedBy { it.name.lowercase() }
-            add(TagGroup(label, group))
+            if (group.isNotEmpty()) add(TagGroup(type.replaceFirstChar { it.uppercase() }, group))
         }
     }
     return FilterList(filters)

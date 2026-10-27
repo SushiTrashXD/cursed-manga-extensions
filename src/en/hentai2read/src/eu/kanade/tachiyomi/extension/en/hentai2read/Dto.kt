@@ -7,7 +7,12 @@ import kotlinx.serialization.Serializable
 @Serializable
 class ListingDto(val props: Props) {
     @Serializable
-    class Props(val books: Books? = null)
+    class Props(
+        val books: Books? = null,
+        // Rankings list theirs as `podium` (top three, page 1 only) and `grid` instead.
+        val podium: List<Book> = emptyList(),
+        val grid: List<Book> = emptyList(),
+    )
 
     @Serializable
     class Books(val data: List<Book> = emptyList())
@@ -38,7 +43,6 @@ class TagPageDto(private val props: Props) {
     val lastPage get() = props.tags.lastPage
 }
 
-// `type` is the URL segment (category, content).
 @Serializable
 class TagDto(
     private val id: Int,
@@ -54,7 +58,7 @@ class BookPageDto(val props: Props) {
     class Props(val book: Book)
 
     @Serializable
-    class Book(val pageCount: Int? = null)
+    class Book(val id: Int)
 }
 
 @Serializable
@@ -62,19 +66,11 @@ class ReaderDto(private val props: Props) {
 
     @Serializable
     class Props(
-        val images: List<String?>? = null,
-        val avif: List<String?>? = null,
+        val images: List<String?>,
+        val avif: List<String?> = emptyList(),
     )
 
-    // `images` holds the webp pages; `avif` repeats the same pages, so only one list is used.
-    fun toPages(): List<Page> = props.images.orEmpty().filterNotNull().ifEmpty { props.avif.orEmpty().filterNotNull() }
-        .mapNotNull(::toHttpsUrl)
-        .mapIndexed { index, url -> Page(index, imageUrl = url) }
-
-    // Protocol-relative URLs are upgraded to HTTPS; anything else that isn't HTTPS is dropped.
-    private fun toHttpsUrl(url: String): String? = when {
-        url.startsWith("https://") -> url
-        url.startsWith("//") -> "https:$url"
-        else -> null
-    }
+    // `avif` repeats the same pages (or is all null), so only one list is used.
+    fun toPages(): List<Page> = props.images.filterNotNull().ifEmpty { props.avif.filterNotNull() }
+        .mapIndexed { index, url -> Page(index, imageUrl = if (url.startsWith("//")) "https:$url" else url) }
 }
