@@ -1,5 +1,8 @@
 package eu.kanade.tachiyomi.extension.en.hentai2read
 
+import androidx.preference.ListPreference
+import androidx.preference.PreferenceScreen
+import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
@@ -13,6 +16,7 @@ import keiyoushi.network.rateLimit
 import keiyoushi.source.KeiSource
 import keiyoushi.utils.asJsoup
 import keiyoushi.utils.firstInstance
+import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.intOrNull
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.selectLast
@@ -23,6 +27,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import okhttp3.HttpUrl
@@ -38,36 +44,63 @@ import kotlin.math.roundToInt
 import kotlin.time.Duration.Companion.seconds
 
 @Source
-abstract class Hentai2Read : KeiSource() {
+abstract class Hentai2Read :
+    KeiSource(),
+    ConfigurableSource {
 
     override val supportsFilterFetching = true
 
+    private val preferences by getPreferencesLazy()
+
     override fun OkHttpClient.Builder.configureClient(): OkHttpClient.Builder = rateLimit(permits = 2, period = 1.seconds)
 
-    // Unlike the other listings, rankings page with ?page=N.
-    override suspend fun getPopularManga(page: Int): MangasPage {
-        val url = if (page > 1) "$baseUrl/ranking?page=$page" else "$baseUrl/ranking"
-        return client.get(url).asJsoup().toMangasPage()
-    }
+    override suspend fun getPopularManga(page: Int): MangasPage = client.get(rankingUrl(preferences.getString(PREF_POPULAR_PERIOD, "").orEmpty(), page)).asJsoup().toMangasPage()
 
     override suspend fun getLatestUpdates(page: Int): MangasPage = client.get(listingUrl("/browse", page)).asJsoup().toMangasPage()
 
     override suspend fun getSearchMangaList(page: Int, query: String, filters: FilterList): MangasPage {
         val tags = filters.filterIsInstance<TagGroup>().flatMap { it.state }
-        val included = tags.filter { it.isIncluded() }.map { it.id }
+        val artists = filters.filterIsInstance<ArtistGroup>().flatMap { it.state }.filter { it.state }
+        val includedTags = tags.filter { it.isIncluded() }
+        val included = includedTags.map { it.id } + artists.map { it.id }
         val excluded = tags.filter { it.isExcluded() }.map { it.id }
+        val selectedPages = includedTags.map { it.url } + artists.map { it.url }
+        val ranking = filters.firstInstance<RankingFilter>().period
 
-        val url = "$baseUrl/search".toHttpUrl().newBuilder().apply {
-            if (query.isNotBlank()) addQueryParameter("q", query)
-            filters.firstInstance<TypeFilter>().value.takeIf { it.isNotEmpty() }?.let { addQueryParameter("type", it) }
-            filters.firstInstance<StatusFilter>().value.takeIf { it.isNotEmpty() }?.let { addQueryParameter("status", it) }
-            filters.firstInstance<SortFilter>().value.takeIf { it.isNotEmpty() }?.let { addQueryParameter("sort", it) }
-            if (included.isNotEmpty()) addQueryParameter("with", included.joinToString(","))
-            if (excluded.isNotEmpty()) addQueryParameter("without", excluded.joinToString(","))
-            if (page > 1) addQueryParameter("page", page.toString())
-        }.build()
+        // Search text always searches. Without it, a ranking or a single included tag/artist opens that page.
+        val url = when {
+            query.isBlank() && ranking != null -> rankingUrl(ranking, page)
+            query.isBlank() && excluded.isEmpty() && selectedPages.size == 1 -> tagPageUrl(selectedPages.single(), filters, page)
+            else -> "$baseUrl/search".toHttpUrl().newBuilder().apply {
+                if (query.isNotBlank()) addQueryParameter("q", query)
+                filters.firstInstance<TypeFilter>().value.takeIf { it.isNotEmpty() }?.let { addQueryParameter("type", it) }
+                filters.firstInstance<StatusFilter>().value.takeIf { it.isNotEmpty() }?.let { addQueryParameter("status", it) }
+                filters.firstInstance<SortFilter>().value.takeIf { it.isNotEmpty() }?.let { addQueryParameter("sort", it) }
+                if (filters.firstInstance<MatchAnyFilter>().state) addQueryParameter("match", "any")
+                if (included.isNotEmpty()) addQueryParameter("with", included.joinToString(","))
+                if (excluded.isNotEmpty()) addQueryParameter("without", excluded.joinToString(","))
+                if (page > 1) addQueryParameter("page", page.toString())
+            }.build().toString()
+        }
 
         return client.get(url).asJsoup().toMangasPage()
+    }
+
+    // Unlike the other listings, rankings page with ?page=N.
+    private fun rankingUrl(period: String, page: Int): String = "$baseUrl/ranking".toHttpUrl().newBuilder().apply {
+        if (period.isNotEmpty()) addQueryParameter("period", period)
+        if (page > 1) addQueryParameter("page", page.toString())
+    }.build().toString()
+
+    // A tag page takes Type, Status and Sort as path segments, e.g. /category/18-adult/doujinshi/completed/newest.
+    private fun tagPageUrl(path: String, filters: FilterList, page: Int): String {
+        val segments = listOf(
+            filters.firstInstance<TypeFilter>().value,
+            filters.firstInstance<StatusFilter>().value,
+            // "Recently updated" is a tag page's default order, so it has no segment.
+            filters.firstInstance<SortFilter>().value.takeUnless { it == "latest" }.orEmpty(),
+        ).filter { it.isNotEmpty() }
+        return listingUrl((listOf(path) + segments).joinToString("/"), page)
     }
 
     // Returns null when the page isn't a manga page (chapter or unknown URL).
@@ -76,18 +109,22 @@ abstract class Hentai2Read : KeiSource() {
         val document = client.get(url).asJsoup()
         if (document.selectFirst(TITLE_SELECTOR) == null) return null
         return parseMangaDetails(document, document.singleChapterPages()).apply {
-            setUrlWithoutDomain(document.selectFirst("link[rel=canonical]")!!.absUrl("href"))
+            val canonical = document.selectFirst("link[rel=canonical]")?.absUrl("href").orEmpty()
+            setUrlWithoutDomain(canonical.ifEmpty { url.toString() })
         }
     }
 
-    // Search and tag pages (/category/18-adult, /artist/6197-…) resolve to a listing; anything else is treated as a single manga.
+    // Search, ranking, browse and tag pages (/category/18-adult, /artist/6197-…) resolve to a listing; anything else is treated as a single manga.
     override suspend fun getMangasByUrl(url: HttpUrl, page: Int): MangasPage {
         if (url.host != baseUrl.toHttpUrl().host) return MangasPage(emptyList(), false)
 
         val segments = url.pathSegments.filter { it.isNotEmpty() }
         val listing = when {
             segments.firstOrNull() == "search" -> url.newBuilder().setQueryParameter("page", page.toString()).build().toString()
-            segments.size >= 2 && segments[0] in LISTING_TYPES -> listingUrl("/${segments[0]}/${segments[1]}", page)
+            segments.firstOrNull() == "ranking" -> rankingUrl(url.queryParameter("period").orEmpty(), page)
+            // Keep the link's other segments (/browse/trending, a tag's /doujinshi/completed); its /page-N gives way to the requested page.
+            segments.firstOrNull() == "browse" || (segments.size >= 2 && segments[0] in LISTING_TYPES) ->
+                listingUrl("/" + segments.dropLastWhile { PAGE_SEGMENT_REGEX.matches(it) }.joinToString("/"), page)
             else -> return MangasPage(listOfNotNull(getMangaByUrl(url)), false)
         }
         return client.get(listing).asJsoup().toMangasPage()
@@ -97,7 +134,7 @@ abstract class Hentai2Read : KeiSource() {
 
     private fun Document.toMangasPage(): MangasPage {
         // The cover badge abbreviates above 1000 ("1.8K pages"), so multi-chapter totals come from the page JSON.
-        val pageCounts = parsePageDataOrNull<ListingDto>()?.props?.run { books?.data.orEmpty() + podium + grid }.orEmpty()
+        val pageCounts = parsePageDataOrNull<ListingDto>()?.books.orEmpty()
             .filter { (it.chapters ?: 0) > 1 }
             .mapNotNull { book -> book.pageCount?.let { book.id to it } }
             .toMap()
@@ -147,7 +184,8 @@ abstract class Hentai2Read : KeiSource() {
         return SMangaUpdate(
             manga = parseMangaDetails(document, pages).apply {
                 url = manga.url
-                memo = manga.memo
+                // Saved so a later chapters-only refresh doesn't fall back to an older count from browsing.
+                memo = pages?.toIntOrNull()?.let { JsonObject(manga.memo + (MEMO_PAGE_COUNT to JsonPrimitive(it))) } ?: manga.memo
                 if (status == SManga.COMPLETED && parsedChapters.size == 1) {
                     update_strategy = UpdateStrategy.ONLY_FETCH_ONCE
                 }
@@ -188,11 +226,11 @@ abstract class Hentai2Read : KeiSource() {
 
     // The book id comes from the page, so entries stored under pre-redesign URLs are found too.
     private suspend fun fetchPagesFromSearch(document: Document, title: String): String? {
-        val id = document.parsePageDataOrNull<BookPageDto>()?.props?.book?.id ?: return null
+        val id = document.parsePageDataOrNull<BookPageDto>()?.id ?: return null
         return try {
             val url = "$baseUrl/search".toHttpUrl().newBuilder().addQueryParameter("q", title).build()
             // An error page (e.g. a Cloudflare 403) has no page data, so it yields null instead of throwing.
-            client.get(url, ensureSuccess = false).asJsoup().parsePageDataOrNull<ListingDto>()?.props?.books?.data.orEmpty()
+            client.get(url, ensureSuccess = false).asJsoup().parsePageDataOrNull<ListingDto>()?.books.orEmpty()
                 .firstOrNull { it.id == id }?.pageCount?.toString()
         } catch (_: IOException) {
             null // a failed lookup shouldn't break the details refresh
@@ -206,8 +244,7 @@ abstract class Hentai2Read : KeiSource() {
             selectFirst("script[type=application/ld+json]")
                 ?.data()
                 ?.parseAs<List<JsonLdDto>>()
-                ?.firstOrNull { it.type == "Book" }
-                ?.numberOfPages
+                ?.firstNotNullOfOrNull { it.bookPages }
                 ?.toString()
         }.getOrNull()
     }
@@ -226,16 +263,30 @@ abstract class Hentai2Read : KeiSource() {
         }
     }
 
-    private fun parseChapters(document: Document): List<SChapter> = document.select("li[id^=chapter-]").map { li ->
-        val link = li.selectFirst("a[href^=/reader/]")!!
-        val number = li.selectFirst("span")?.text().orEmpty()
+    private fun parseChapters(document: Document): List<SChapter> {
+        val jsonChapters = document.parsePageDataOrNull<BookPageDto>()?.chapters.orEmpty()
+        if (jsonChapters.isNotEmpty()) {
+            return jsonChapters.map { chapter ->
+                SChapter.create().apply {
+                    setUrlWithoutDomain(chapter.url)
+                    name = if (chapter.number.isNotEmpty()) "Ch. ${chapter.number} - ${chapter.title}" else chapter.title
+                    chapter_number = chapter.number.toFloatOrNull() ?: -1f
+                    date_upload = dateFormat.tryParseDate(chapter.date, ZoneOffset.UTC)
+                }
+            }
+        }
 
-        SChapter.create().apply {
-            setUrlWithoutDomain(link.absUrl("href"))
-            name = if (number.isNotEmpty()) "Ch. $number - ${link.text()}" else link.text()
-            chapter_number = number.toFloatOrNull() ?: -1f
-            // A "New" badge span can sit between the title and the date, so take the last span.
-            date_upload = dateFormat.tryParseDate(li.selectLast("a[href^=/reader/] ~ span")?.text(), ZoneOffset.UTC)
+        return document.select("li[id^=chapter-]").map { li ->
+            val link = li.selectFirst("a[href^=/reader/]")!!
+            val number = li.selectFirst("span")?.text().orEmpty()
+
+            SChapter.create().apply {
+                setUrlWithoutDomain(link.absUrl("href"))
+                name = if (number.isNotEmpty()) "Ch. $number - ${link.text()}" else link.text()
+                chapter_number = number.toFloatOrNull() ?: -1f
+                // A "New" badge span can sit between the title and the date, so take the last span.
+                date_upload = dateFormat.tryParseDate(li.selectLast("a[href^=/reader/] ~ span")?.text(), ZoneOffset.UTC)
+            }
         }
     }
 
@@ -245,8 +296,13 @@ abstract class Hentai2Read : KeiSource() {
     }
 
     override suspend fun fetchFilterData(): JsonElement = coroutineScope {
-        TAG_TYPES.map { type -> async { fetchTags(type) } }.awaitAll().flatten()
+        (TAG_TYPES.map { type -> async { fetchTags(type) } } + async { fetchTopArtists() }).awaitAll().flatten()
     }.toJsonElement()
+
+    // Only the first page (the artists with the most series), like the site's own artist picker.
+    private suspend fun fetchTopArtists(): List<TagDto> = client.get("$baseUrl/tags/artist").asJsoup()
+        .parsePageData<TagPageDto>().tags
+        .filter { it.name != "Unknown" }
 
     private suspend fun fetchTags(type: String): List<TagDto> {
         val first = client.get("$baseUrl/tags/$type").asJsoup().parsePageData<TagPageDto>()
@@ -263,6 +319,17 @@ abstract class Hentai2Read : KeiSource() {
         return hentai2readFilters(tags)
     }
 
+    override fun setupPreferenceScreen(screen: PreferenceScreen) {
+        ListPreference(screen.context).apply {
+            key = PREF_POPULAR_PERIOD
+            title = "Popular period"
+            entries = RANKING_PERIODS.map { it.first }.toTypedArray()
+            entryValues = RANKING_PERIODS.map { it.second }.toTypedArray()
+            summary = "%s"
+            setDefaultValue("")
+        }.also(screen::addPreference)
+    }
+
     // Inertia page JSON, embedded in <script data-page="app">.
     private inline fun <reified T> Document.parsePageData(): T {
         val script = selectFirst("script[data-page=app]")?.data()
@@ -276,6 +343,8 @@ abstract class Hentai2Read : KeiSource() {
         private const val MAX_TAG_PAGES = 20
         private const val MEMO_PAGE_COUNT = "pageCount"
 
+        private const val PREF_POPULAR_PERIOD = "popular_period"
+
         private const val TITLE_SELECTOR = "h1#book-title"
 
         // Sponsored tiles use <article data-promo> and are excluded. The ranking's top three aren't cards:
@@ -284,6 +353,7 @@ abstract class Hentai2Read : KeiSource() {
         private const val NEXT_PAGE_SELECTOR = "nav[aria-label=Pages] a[rel=next]"
 
         private val LISTING_TYPES = setOf("category", "content", "artist", "parody", "character")
+        private val PAGE_SEGMENT_REGEX = Regex("""page-\d+""")
 
         // "Pages:\n33" saved by an earlier refresh; earlier builds also wrote "1,842" or "1.8K".
         private val PAGES_DESC_REGEX = Regex("""^Pages:\s*([0-9][0-9,]*(?:\.[0-9]+)?\s*[KkMm]?)""", RegexOption.MULTILINE)

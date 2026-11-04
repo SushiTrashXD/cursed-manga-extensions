@@ -5,7 +5,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 @Serializable
-class ListingDto(val props: Props) {
+class ListingDto(private val props: Props) {
     @Serializable
     class Props(
         val books: Books? = null,
@@ -19,13 +19,17 @@ class ListingDto(val props: Props) {
 
     @Serializable
     class Book(val id: Int, val pageCount: Int? = null, val chapters: Int? = null)
+
+    val books get() = props.books?.data.orEmpty() + props.podium + props.grid
 }
 
 @Serializable
 class JsonLdDto(
-    @SerialName("@type") val type: String? = null,
-    val numberOfPages: Int? = null,
-)
+    @SerialName("@type") private val type: String? = null,
+    private val numberOfPages: Int? = null,
+) {
+    val bookPages get() = numberOfPages.takeIf { type == "Book" }
+}
 
 @Serializable
 class TagPageDto(private val props: Props) {
@@ -46,19 +50,35 @@ class TagPageDto(private val props: Props) {
 @Serializable
 class TagDto(
     private val id: Int,
-    private val name: String,
+    val name: String,
     val type: String,
+    private val url: String,
 ) {
-    internal fun toFilter() = TagFilter(id, name)
+    internal fun toFilter() = TagFilter(id, name, url)
+    internal fun toArtistFilter() = ArtistFilter(id, name, url)
 }
 
 @Serializable
-class BookPageDto(val props: Props) {
+class BookPageDto(private val props: Props) {
     @Serializable
-    class Props(val book: Book)
+    class Props(
+        val book: Book,
+        val chapters: List<Chapter> = emptyList(),
+    )
 
     @Serializable
     class Book(val id: Int)
+
+    @Serializable
+    class Chapter(
+        val number: String,
+        val title: String,
+        val url: String,
+        val date: String? = null,
+    )
+
+    val id get() = props.book.id
+    val chapters get() = props.chapters
 }
 
 @Serializable
